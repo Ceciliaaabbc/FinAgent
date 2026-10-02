@@ -30,6 +30,8 @@ TEACHER = {
     "model": _env("TEACHER_MODEL", "deepseek-chat"),
     "price_in": float(_env("TEACHER_PRICE_IN", "0")),    # 元 / 百万输入 tokens
     "price_out": float(_env("TEACHER_PRICE_OUT", "0")),  # 元 / 百万输出 tokens
+    # 推理模型（如 Qwen3.5）默认先“思考”再回答，又慢又会耗尽输出长度；填 none 可关闭思考
+    "reasoning_effort": _env("TEACHER_REASONING_EFFORT"),
 }
 
 # “学生模型”：用 vLLM 部署的 Qwen（原始或微调后），vLLM 提供 OpenAI 兼容接口
@@ -37,6 +39,7 @@ STUDENT = {
     "base_url": _env("STUDENT_BASE_URL", "http://localhost:8000/v1"),
     "api_key": _env("STUDENT_API_KEY", "EMPTY"),
     "model": _env("STUDENT_MODEL", "sentiment"),
+    "reasoning_effort": _env("STUDENT_REASONING_EFFORT"),
     "price_in": 0.0,
     "price_out": 0.0,
 }

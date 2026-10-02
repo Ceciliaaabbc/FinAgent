@@ -5,7 +5,7 @@
 
 - 每只股票单独存一个文件，已下载的会跳过 → 中断后重新运行即可断点续传。
 - 前复权（qfq）：消除分红送股造成的价格跳空，否则程序会误以为股价暴跌。
-- 数据源：优先新浪；失败时改用东方财富。两者统一成相同的列：
+- 数据源：依次尝试新浪 → 腾讯 → 东方财富，前一个失败就换下一个（网络不稳定时很常见）。统一成相同的列：
   date, code, open, high, low, close, volume, amount, turnover（小数，0.01 = 1%）, pct_chg（小数）
 """
 import argparse
@@ -37,6 +37,13 @@ def from_sina(code: str) -> pd.DataFrame:
     return df  # 新浪的 turnover 本身就是小数
 
 
+def from_tencent(code: str) -> pd.DataFrame:
+    df = fetch_with_retry(ak.stock_zh_a_hist_tx, symbol=with_exchange_prefix(code),
+                          start_date=START_DATE, end_date=END_DATE, adjust="qfq")
+    df["code"] = code
+    return df  # 腾讯的 volume 单位是股，turnover 是小数，与新浪一致
+
+
 def from_eastmoney(code: str) -> pd.DataFrame:
     df = fetch_with_retry(ak.stock_zh_a_hist, symbol=code, period="daily",
                           start_date=START_DATE, end_date=END_DATE, adjust="qfq")
@@ -47,12 +54,18 @@ def from_eastmoney(code: str) -> pd.DataFrame:
     return df
 
 
+SOURCES = [("新浪", from_sina), ("腾讯", from_tencent), ("东方财富", from_eastmoney)]
+
+
 def download_one(code: str) -> pd.DataFrame:
-    try:
-        df = from_sina(code)
-    except Exception as e:  # noqa: BLE001
-        print(f"  {code} 新浪失败（{e}），改用东方财富")
-        df = from_eastmoney(code)
+    for i, (name, fetch) in enumerate(SOURCES):
+        try:
+            df = fetch(code)
+            break
+        except Exception as e:  # noqa: BLE001
+            if i == len(SOURCES) - 1:
+                raise
+            print(f"  {code} {name}失败（{str(e)[:80]}），改用{SOURCES[i + 1][0]}")
     df = df[OUT_COLUMNS].copy()
     df["date"] = pd.to_datetime(df["date"])
     df = df.sort_values("date").reset_index(drop=True)

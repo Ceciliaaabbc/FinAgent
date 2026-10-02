@@ -18,20 +18,22 @@ from .prompts import parse_output
 
 
 class ChatModel:
-    def __init__(self, base_url: str, api_key: str, model: str,
-                 max_tokens: int = 120, temperature: float = 0.0, **_):
+    def __init__(self, base_url: str, api_key: str, model: str, max_tokens: int = 120,
+                 temperature: float = 0.0, reasoning_effort: str = "", **_):
         if not api_key:
             raise SystemExit("缺少 API Key：请复制 .env.example 为 .env 并填写")
         self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=60, max_retries=3)
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature  # 0 = 输出尽量确定，便于复现
+        # 只在设置了才传，避免不支持该参数的服务报错
+        self.extra_body = {"reasoning_effort": reasoning_effort} if reasoning_effort else None
 
     def __call__(self, messages: list[dict]) -> dict:
         start = time.perf_counter()
         resp = self.client.chat.completions.create(
             model=self.model, messages=messages,
-            temperature=self.temperature, max_tokens=self.max_tokens)
+            temperature=self.temperature, max_tokens=self.max_tokens, extra_body=self.extra_body)
         usage = resp.usage
         return {
             "raw": resp.choices[0].message.content or "",

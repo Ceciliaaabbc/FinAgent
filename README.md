@@ -113,19 +113,25 @@ FinAgent/
 
 整体流程：**本地**抽样、标注、建数据集 → **GPU 服务器**微调、部署 → 评估 → 全量打分。
 
-### 第 1 步：配置 API（本地）
+### 第 1 步：配置老师模型（本地）
+
+推荐先用**本地 Ollama**（免费，不用注册）。`.env.example` 默认就是这个方案：
 
 ```bash
-cp .env.example .env
-# 编辑 .env，填写 TEACHER_API_KEY（如 DeepSeek），以及价格（用于估算成本）
+ollama pull qwen3.5:9b        # 约 6.6GB，18GB 内存的 Mac 可以流畅运行
+cp .env.example .env          # 默认配置即可，无需修改
 ```
+
+也可以改用 DeepSeek 等云端 API，按 `.env.example` 中方案 B / C 的说明修改即可。
+
+> Qwen3.5 等推理模型默认会先“思考”再回答，既慢又会导致输出为空。`.env` 中的 `TEACHER_REASONING_EFFORT=none` 用于关闭思考。
 
 ### 第 2 步：抽样、标注、抽检、建数据集（本地）
 
 ```bash
 python -m src.sentiment.sample_events --n 5000        # 抽样 5000 条
-python -m src.sentiment.label_with_api --limit 50     # 先标 50 条，检查效果和成本
-python -m src.sentiment.label_with_api                # 标注全部（断点续传）
+python -m src.sentiment.label_with_api --limit 50 --workers 4   # 先标 50 条，检查效果
+caffeinate -i python -m src.sentiment.label_with_api --workers 4 # 标注全部（防休眠，断点续传）
 python -m src.sentiment.review --export --n 200       # 导出抽检表，在 Excel 中填写 human_label
 python -m src.sentiment.review --score                # 计算老师模型与人工的一致率
 python -m src.sentiment.build_dataset                 # 按时间划分 + 转成微调格式
@@ -135,16 +141,21 @@ python -m src.sentiment.build_dataset                 # 按时间划分 + 转成
 
 ### 第 3 步：LoRA 微调（GPU 服务器）
 
-在 AutoDL 等平台租一张 24G 显卡（RTX 4090 / 3090），然后：
+在 AutoDL 等平台租一张 24G 显卡（RTX 4090 / 3090）。项目和模型放在数据盘 `/root/autodl-tmp`（系统盘很小）：
 
 ```bash
-git clone git@github.com:Ceciliaaabbc/FinAgent.git && cd FinAgent
-pip install -r requirements.txt -r requirements-gpu.txt
-# 把本地的 data/llm/sentiment/ 整个目录上传到服务器同一位置（scp 或网盘）
+cd /root/autodl-tmp
+git clone https://github.com/Ceciliaaabbc/FinAgent.git && cd FinAgent
+# 把本地的 data/llm/sentiment/ 整个目录上传到服务器同一位置（scp 或 JupyterLab 上传）
+
+# LLaMA-Factory 和 vLLM 依赖的 PyTorch 版本不同，分两个环境安装，避免冲突
+conda create -n train python=3.11 -y && conda activate train
+pip install llamafactory
 
 # 国内服务器下载模型慢时，二选一：
 export HF_ENDPOINT=https://hf-mirror.com      # HuggingFace 镜像
 # export USE_MODELSCOPE_HUB=1                  # 或改用 ModelScope
+export HF_HOME=/root/autodl-tmp/hf_cache      # 模型缓存放在数据盘
 
 llamafactory-cli train configs/sentiment_lora_sft.yaml
 # 完成后得到 outputs/qwen2.5-3b-sentiment-lora/（LoRA 补丁 + training_loss.png）
@@ -153,12 +164,20 @@ llamafactory-cli train configs/sentiment_lora_sft.yaml
 ### 第 4 步：部署与评估
 
 ```bash
-# 在服务器上启动 vLLM：同时提供原始模型和微调后的模型（LoRA 模块名为 sentiment）
+# 在服务器上新建部署环境（与训练环境分开）
+conda create -n serve python=3.11 -y && conda activate serve
+pip install vllm
+
+# 在 tmux 中启动 vLLM，SSH 断开后服务不会停：同时提供原始模型和微调后的模型（LoRA 模块名为 sentiment）
+tmux new -s vllm
+export HF_ENDPOINT=https://hf-mirror.com HF_HOME=/root/autodl-tmp/hf_cache
 vllm serve Qwen/Qwen2.5-3B-Instruct --port 8000 \
     --enable-lora --max-lora-rank 8 \
     --lora-modules sentiment=outputs/qwen2.5-3b-sentiment-lora
 
-# 另开一个终端（服务器上，或本地通过 ssh -L 8000:localhost:8000 转发后）：
+# 在本地 Mac 上评估：先建立 SSH 隧道（端口和地址换成 AutoDL 的登录指令），保持窗口不关
+#   ssh -CNg -L 8000:127.0.0.1:8000 -p 端口 root@服务器地址
+# 再另开一个终端运行：
 python -m src.sentiment.evaluate --name keyword --provider keyword
 python -m src.sentiment.evaluate --name teacher_api --target teacher
 python -m src.sentiment.evaluate --name qwen3b_base --target student --model Qwen/Qwen2.5-3B-Instruct --prompt teacher

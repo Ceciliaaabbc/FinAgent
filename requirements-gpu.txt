@@ -1,3 +1,6 @@
 # 只在 GPU 服务器上安装（阶段 2 的微调与部署）
+# 两者依赖的 PyTorch 版本不同，请分别装在两个 conda 环境中：
+#   conda create -n train python=3.11 -y && conda activate train && pip install llamafactory
+#   conda create -n serve python=3.11 -y && conda activate serve && pip install vllm
 llamafactory>=0.9
 vllm>=0.6
