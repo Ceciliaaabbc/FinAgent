@@ -28,7 +28,7 @@
 
 - [x] 阶段 0：环境准备
 - [x] 阶段 1：数据管道
-- [ ] 阶段 2：金融情绪模型
+- [x] 阶段 2：金融情绪模型（代码完成；标注、训练需 API Key 和 GPU）
 - [ ] 阶段 3：情绪因子与因子检验
 - [ ] 阶段 4：LLM 自动挖掘因子
 - [ ] 阶段 5：LightGBM 合成与策略回测
@@ -71,13 +71,30 @@ FinAgent/
 │   │   ├── check_data.py           # 1.6 数据质量检查
 │   │   └── run_stage1.py           # 一键运行阶段 1
 │   ├── sentiment/        # 阶段 2：情绪模型
+│   │   ├── config.py               # 路径、标签、模型接口（读取 .env）
+│   │   ├── prompts.py              # 2.1 标注规则、老师/学生提示词、输出解析
+│   │   ├── keyword_baseline.py     # 关键词词典基线（对照组 / 无 API 时跑通流程）
+│   │   ├── llm_client.py           # OpenAI 兼容客户端 + 并发批处理（断点续传）
+│   │   ├── events.py               # 读取阶段 1 的文本事件
+│   │   ├── sample_events.py        # 2.2 抽样待标注数据
+│   │   ├── label_with_api.py       # 2.2 老师模型批量标注
+│   │   ├── review.py               # 2.3 人工抽检
+│   │   ├── build_dataset.py        # 2.4–2.5 按时间划分 + 转微调格式
+│   │   ├── evaluate.py             # 2.7 评估与对比表
+│   │   ├── build_dpo.py            # 2.8 构造 DPO 偏好数据
+│   │   └── score_events.py         # 2.9 全量打分 → 阶段 3
 │   ├── factors/          # 阶段 3–4：因子计算与挖掘
 │   ├── backtest/         # 阶段 5：回测
 │   ├── agent/            # 阶段 6：RAG + Agent
 │   └── api/              # 阶段 7：后端接口
 ├── notebooks/            # 实验和分析
 ├── configs/
-└── requirements.txt
+│   ├── sentiment_lora_sft.yaml     # 2.6 LoRA 微调配置（LLaMA-Factory）
+│   └── sentiment_dpo.yaml          # 2.8 DPO 配置
+├── outputs/              # 模型权重、评估结果（不上传 GitHub）
+├── .env.example          # API 配置模板，复制为 .env 后填写
+├── requirements.txt      # 本地依赖
+└── requirements-gpu.txt  # GPU 服务器依赖（LLaMA-Factory、vLLM）
 ```
 
 ### 阶段 1 输出的数据
@@ -91,6 +108,87 @@ FinAgent/
 | `data/processed/news_raw.parquet` | 每日采集的新闻（持续积累） |
 | `data/processed/events.parquet` | 对齐后的文本事件：code, trade_date, publish_time, title, content, source, url |
 | `data/processed/data_report.md` | 数据质量报告 |
+
+## 阶段 2 运行方法
+
+整体流程：**本地**抽样、标注、建数据集 → **GPU 服务器**微调、部署 → 评估 → 全量打分。
+
+### 第 1 步：配置 API（本地）
+
+```bash
+cp .env.example .env
+# 编辑 .env，填写 TEACHER_API_KEY（如 DeepSeek），以及价格（用于估算成本）
+```
+
+### 第 2 步：抽样、标注、抽检、建数据集（本地）
+
+```bash
+python -m src.sentiment.sample_events --n 5000        # 抽样 5000 条
+python -m src.sentiment.label_with_api --limit 50     # 先标 50 条，检查效果和成本
+python -m src.sentiment.label_with_api                # 标注全部（断点续传）
+python -m src.sentiment.review --export --n 200       # 导出抽检表，在 Excel 中填写 human_label
+python -m src.sentiment.review --score                # 计算老师模型与人工的一致率
+python -m src.sentiment.build_dataset                 # 按时间划分 + 转成微调格式
+```
+
+> 没有 API Key 时，可以给 `label_with_api` 加 `--provider keyword`，用关键词基线先跑通流程（标签质量很差，只用于测试）。
+
+### 第 3 步：LoRA 微调（GPU 服务器）
+
+在 AutoDL 等平台租一张 24G 显卡（RTX 4090 / 3090），然后：
+
+```bash
+git clone git@github.com:Ceciliaaabbc/FinAgent.git && cd FinAgent
+pip install -r requirements.txt -r requirements-gpu.txt
+# 把本地的 data/llm/sentiment/ 整个目录上传到服务器同一位置（scp 或网盘）
+
+# 国内服务器下载模型慢时，二选一：
+export HF_ENDPOINT=https://hf-mirror.com      # HuggingFace 镜像
+# export USE_MODELSCOPE_HUB=1                  # 或改用 ModelScope
+
+llamafactory-cli train configs/sentiment_lora_sft.yaml
+# 完成后得到 outputs/qwen2.5-3b-sentiment-lora/（LoRA 补丁 + training_loss.png）
+```
+
+### 第 4 步：部署与评估
+
+```bash
+# 在服务器上启动 vLLM：同时提供原始模型和微调后的模型（LoRA 模块名为 sentiment）
+vllm serve Qwen/Qwen2.5-3B-Instruct --port 8000 \
+    --enable-lora --max-lora-rank 8 \
+    --lora-modules sentiment=outputs/qwen2.5-3b-sentiment-lora
+
+# 另开一个终端（服务器上，或本地通过 ssh -L 8000:localhost:8000 转发后）：
+python -m src.sentiment.evaluate --name keyword --provider keyword
+python -m src.sentiment.evaluate --name teacher_api --target teacher
+python -m src.sentiment.evaluate --name qwen3b_base --target student --model Qwen/Qwen2.5-3B-Instruct --prompt teacher
+python -m src.sentiment.evaluate --name qwen3b_sft  --target student --model sentiment --prompt student
+python -m src.sentiment.evaluate --summary            # 生成 outputs/eval/summary.md 对比表
+```
+
+**AWQ 4-bit 量化实验（可选）**：把基座换成 `Qwen/Qwen2.5-3B-Instruct-AWQ`，加载同一个 LoRA 补丁重新评估，对比准确率、显存和速度。补丁是在非量化模型上训练的，准确率可能略降，这正是要观察的权衡。
+
+### 第 5 步（加分项）：DPO
+
+```bash
+python -m src.sentiment.evaluate --name qwen3b_sft --target student --model sentiment --split train
+python -m src.sentiment.build_dpo --preds outputs/eval/preds_qwen3b_sft_train.jsonl
+llamafactory-cli train configs/sentiment_dpo.yaml
+# 用 --lora-modules sentiment_dpo=outputs/qwen2.5-3b-sentiment-dpo 部署后再评估一次
+```
+
+### 第 6 步：全量打分（输出给阶段 3）
+
+```bash
+python -m src.sentiment.score_events                      # 用微调模型
+python -m src.sentiment.score_events --provider keyword   # 模型还没训练好时，先用关键词基线
+# 输出 data/processed/sentiment_scores.parquet
+```
+
+### 阶段 2 的两个注意点
+
+- **测试集的标准答案是老师模型的标签**。评估衡量的是“学生学到了老师几成”；老师本身的可靠性看人工抽检的一致率。
+- **例行公告比例**：抽样时把例行公告（股东大会、付息、法律意见书等）控制在 30%，训练集中“中性”下采样到最多 50%；验证集和测试集保持原始分布，评估才真实。
 
 ---
 

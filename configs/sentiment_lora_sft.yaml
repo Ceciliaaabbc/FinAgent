@@ -1,0 +1,45 @@
+# 步骤 2.6：LoRA 监督微调（SFT）
+# 在 GPU 服务器的项目根目录运行：llamafactory-cli train configs/sentiment_lora_sft.yaml
+
+### 模型
+model_name_or_path: Qwen/Qwen2.5-3B-Instruct   # 先用 3B 跑通；显存够再换 7B
+
+### 方法
+stage: sft                 # 监督微调
+do_train: true
+finetuning_type: lora
+lora_rank: 8               # 补丁大小：越大能力越强，但越容易过拟合
+lora_alpha: 16             # 补丁的缩放系数，一般设为 rank 的 2 倍
+lora_dropout: 0.05
+lora_target: all           # 给所有线性层加补丁
+
+### 数据
+dataset: finagent_sentiment_train
+eval_dataset: finagent_sentiment_val
+dataset_dir: data/llm/sentiment    # build_dataset.py 生成的目录（含 dataset_info.json）
+template: qwen                     # 与模型对应的对话模板
+cutoff_len: 512                    # 最大长度（公告标题很短，512 足够）
+overwrite_cache: true
+preprocessing_num_workers: 8
+
+### 输出
+output_dir: outputs/qwen2.5-3b-sentiment-lora
+logging_steps: 10
+save_steps: 200
+plot_loss: true            # 保存 loss 曲线图
+overwrite_output_dir: true
+report_to: none
+
+### 训练
+per_device_train_batch_size: 8
+gradient_accumulation_steps: 2     # 等效 batch = 8 × 2 = 16
+learning_rate: 1.0e-4
+num_train_epochs: 3.0              # 把训练数据完整训练 3 遍
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true                         # RTX 30/40 系列、A100 支持；不支持时改为 fp16: true
+
+### 验证
+per_device_eval_batch_size: 8
+eval_strategy: steps
+eval_steps: 200

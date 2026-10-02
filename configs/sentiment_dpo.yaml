@@ -1,0 +1,33 @@
+# 步骤 2.8（加分项）：DPO 对齐，在 SFT 补丁的基础上继续训练
+# 先运行 build_dpo.py 生成偏好数据，再运行：llamafactory-cli train configs/sentiment_dpo.yaml
+
+model_name_or_path: Qwen/Qwen2.5-3B-Instruct
+adapter_name_or_path: outputs/qwen2.5-3b-sentiment-lora   # 加载 SFT 得到的补丁
+
+stage: dpo
+do_train: true
+finetuning_type: lora
+lora_target: all
+pref_beta: 0.1             # 越大越保守（越不偏离 SFT 模型）
+pref_loss: sigmoid         # 标准 DPO 损失
+
+dataset: finagent_sentiment_dpo
+dataset_dir: data/llm/sentiment
+template: qwen
+cutoff_len: 512
+overwrite_cache: true
+
+output_dir: outputs/qwen2.5-3b-sentiment-dpo
+logging_steps: 10
+save_steps: 200
+plot_loss: true
+overwrite_output_dir: true
+report_to: none
+
+per_device_train_batch_size: 4
+gradient_accumulation_steps: 4
+learning_rate: 5.0e-6      # DPO 学习率要比 SFT 小得多
+num_train_epochs: 1.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
